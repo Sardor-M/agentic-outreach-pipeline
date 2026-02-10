@@ -161,8 +161,8 @@ python run.py search "copper fittings factory USA"
 Generate a detailed multi-page sales proposal for a specific company:
 
 ```bash
-python run.py proposal "Koelle GmbH, Germany"
-python run.py proposal "Mueller Automotive GmbH, Germany, 150 press machines"
+python run.py proposal "Sample Metalworks GmbH, Germany"
+python run.py proposal "Example Automotive GmbH, Germany, 150 press machines"
 ```
 
 ### Other Modes
@@ -239,11 +239,11 @@ Uses ChromaDB's default Sentence Transformers model (all-MiniLM-L6-v2). No addit
   "timestamp": "20260209_180100",
   "prospects": [
     {
-      "company": "Koelle GmbH",
-      "url": "https://www.koelle-gmbh.de",
-      "email": "info@koelle-gmbh.de",
+      "company": "Sample Metalworks GmbH",
+      "url": "https://www.sample-metalworks.de",
+      "email": "info@sample-metalworks.de",
       "deal_estimate": {
-        "company_name": "Koelle GmbH",
+        "company_name": "Sample Metalworks GmbH",
         "industry": "Automotive Metal Stamping",
         "estimated_machines": 50,
         "first_year_value": 280000,
