@@ -5,3 +5,6 @@ __pycache__/
 outputs/
 chroma_data/
 .ruff_cache/
+
+
+docs/
