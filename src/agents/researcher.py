@@ -99,7 +99,7 @@ class ResearcherAgent(BaseAgent):
     ) -> AgentResult:
         """Run the multi-turn tool-use loop."""
         for turn in range(self.max_turns):
-            print(f"\n  -- Turn {turn + 1}/{self.max_turns} --")
+            print(f"  Turn {turn + 1}/{self.max_turns}")
 
             # Prune context if needed
             messages = self.context_manager.prune_messages(messages)
@@ -140,7 +140,7 @@ class ResearcherAgent(BaseAgent):
 
                         # Summarize tool results instead of blind truncation
                         result = self.context_manager.summarize_tool_result(tool_name, result)
-                        print(f"  Result: {result[:100]}...")
+                        print(f"  Result: {result[:80]}")
 
                         tool_results.append({
                             "type": "tool_result",
@@ -157,7 +157,7 @@ class ResearcherAgent(BaseAgent):
                     if hasattr(block, "text"):
                         final_text += block.text
 
-                print(f"\n  Research complete ({total_in} in / {total_out} out, {turn + 1} turns)")
+                print(f"  Research complete ({total_in} in / {total_out} out, {turn + 1} turns)")
                 return AgentResult(
                     agent=self.role,
                     success=True,
@@ -167,7 +167,7 @@ class ResearcherAgent(BaseAgent):
                 )
 
         # Hit max turns — ask for final summary
-        print(f"\n  Warning: Hit max turns ({self.max_turns}). Extracting final response...")
+        print(f"  Max turns ({self.max_turns}) reached. Extracting final response.")
         messages.append({
             "role": "user",
             "content": (
