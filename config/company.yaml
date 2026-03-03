@@ -1,0 +1,49 @@
+# Company Profile — Domain-agnostic configuration
+# Change this file to configure the pipeline for any company.
+
+name: "SmartFactory Solutions Inc."
+location: "San Jose, California, USA"
+website: "https://smartfactorysolutions.example.com"
+industry: "Smart Manufacturing / Industrial IoT"
+
+stats:
+  clients: "500+ client companies worldwide"
+  countries: "30+ countries served"
+  projects: "100+ Smart Factory projects delivered"
+  technology: "100% in-house technology"
+  exports: "$1M+ export value (2024)"
+
+contact:
+  email: "sales@smartfactorysolutions.example.com"
+  phone: "+1-408-555-0199"
+
+# Short summary for agents that don't need full product context
+short_description: "SmartFactory Solutions sells ProMonitor X1 (hardware process monitoring) + FactoryOS Platform (software monitoring platform) to manufacturing factories."
+
+# Pricing guidelines (internal, for deal estimation)
+pricing:
+  hardware_unit_range: "$8,000 - $15,000 per machine"
+  software_license_range: "$2,000 - $6,000/month"
+  implementation_range: "$15,000 - $50,000 one-time"
+  annual_support: "15-20% of hardware cost"
+
+deal_categories:
+  small:
+    label: "Small"
+    max_first_year: 100000
+    machine_threshold: 20
+  medium:
+    label: "Medium"
+    max_first_year: 400000
+    machine_threshold: 100
+  enterprise:
+    label: "Enterprise"
+    min_first_year: 400000
+    machine_threshold: 100
+
+# Sales team sign-off for emails
+email_signature: |
+  Best regards,
+  SmartFactory Solutions Sales Team
+  sales@smartfactorysolutions.example.com | +1-408-555-0199
+  https://smartfactorysolutions.example.com

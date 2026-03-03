@@ -1,0 +1,42 @@
+# Extraction schemas for LangExtract structured extraction
+# Each schema defines fields to extract from web page text
+
+company_facts:
+  description: "General company facts from a web page"
+  fields:
+    company_name: "The official company name"
+    industry: "What industry the company operates in"
+    products: "What products or services they offer"
+    location: "Where the company is headquartered or operates"
+    employee_count: "Number of employees if mentioned"
+    revenue: "Revenue or financial figures if mentioned"
+    key_customers: "Notable customers or clients mentioned"
+    certifications: "Any quality or industry certifications (ISO, etc.)"
+
+manufacturing:
+  description: "Manufacturing-specific facts"
+  fields:
+    equipment_types: "Types of manufacturing equipment used (presses, CNC, etc.)"
+    machine_count: "Number of machines or production lines"
+    production_capacity: "Production volume or capacity figures"
+    materials: "Materials processed (metals, plastics, etc.)"
+    processes: "Manufacturing processes used (stamping, forging, molding, etc.)"
+    factory_size: "Factory floor area or number of facilities"
+
+esg:
+  description: "ESG and sustainability information"
+  fields:
+    esg_initiatives: "Environmental, social, or governance initiatives"
+    carbon_reporting: "Carbon emission reporting or reduction goals"
+    certifications: "ESG-related certifications (ISO 14001, etc.)"
+    sustainability_goals: "Stated sustainability targets or commitments"
+    energy_sources: "Energy sources used (solar, grid, etc.)"
+
+financial:
+  description: "Financial and business information"
+  fields:
+    revenue: "Annual revenue or sales figures"
+    growth: "Growth rates or trends"
+    investments: "Recent investments or capex"
+    market_share: "Market share or competitive position"
+    funding: "Funding rounds or financial backing"
