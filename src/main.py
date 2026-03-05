@@ -177,6 +177,83 @@ def format_prospect_for_agent(prospect: dict) -> str:
     )
 
 
+# ── Streaming ──
+
+
+def _create_stream_handler():
+    """Create a Rich-based streaming event handler for CLI output.
+
+    Returns a callback that formats agent events with Rich styling,
+    or None if Rich is not available (falls back to print-based output).
+    Thread-safe for parallel agent execution.
+    """
+    if not RICH_AVAILABLE:
+        return None
+
+    import threading
+
+    console = Console()
+    lock = threading.Lock()
+
+    def handler(event):
+        event_type = event.get("type")
+        agent = event.get("agent", "")
+
+        with lock:
+            if event_type == "agent_start":
+                task = event.get("task", "")[:60]
+                console.print(f"\n[bold blue]▸ {agent.title()}[/] — {task}...")
+
+            elif event_type == "turn":
+                turn = event.get("turn", 0)
+                max_turns = event.get("max_turns", 0)
+                console.print(f"  [dim]Turn {turn}/{max_turns}[/]")
+
+            elif event_type == "tool_call":
+                tool = event.get("tool", "")
+                tool_input = json.dumps(event.get("input", {}))[:60]
+                console.print(f"  [dim]Tool: {tool}[/]({tool_input})")
+
+            elif event_type == "tool_result":
+                preview = event.get("result_preview", "")[:80]
+                console.print(f"  [dim]→ {preview}[/]")
+
+            elif event_type == "agent_end":
+                tokens_in = event.get("tokens_in", 0)
+                tokens_out = event.get("tokens_out", 0)
+                duration = event.get("duration", 0)
+                success = event.get("success", False)
+                icon = "✓" if success else "✗"
+                color = "green" if success else "red"
+                console.print(
+                    f"  [{color}]{icon}[/] Done — "
+                    f"{tokens_in:,}+{tokens_out:,} tokens, {duration:.1f}s"
+                )
+
+            elif event_type == "agent_error":
+                console.print(f"  [red]✗ Error: {event.get('error', '')}[/]")
+
+            elif event_type == "pipeline_end":
+                console.print()
+                table = Table(show_edge=False, pad_edge=False)
+                table.add_column("Metric", style="bold")
+                table.add_column("Value", justify="right")
+                table.add_row("Tokens In", f"{event.get('tokens_in', 0):,}")
+                table.add_row("Tokens Out", f"{event.get('tokens_out', 0):,}")
+                table.add_row("Duration", f"{event.get('duration', 0):.1f}s")
+                console.print(table)
+
+            elif event_type == "retry":
+                wait = event.get("wait", 0)
+                console.print(f"  [yellow]Rate limited. Waiting {wait}s...[/]")
+
+            elif event_type == "fallback":
+                error = event.get("error", "")
+                console.print(f"  [yellow]Fallback: {error}[/]")
+
+    return handler
+
+
 # ── Commands ──
 
 
@@ -303,8 +380,9 @@ def plan_command(company_input: str):
 
 
 def proposal_command(company_input: str):
-    """Generate a full proposal."""
-    result = run_pipeline(company_input)
+    """Generate a full proposal with real-time streaming progress."""
+    on_event = _create_stream_handler()
+    result = run_pipeline(company_input, on_event=on_event)
     print(f"\nOpen your proposal: {result['proposal_path']}")
 
 
@@ -329,7 +407,8 @@ def interactive_mode():
         print("No input provided. Exiting.")
         return
 
-    result = run_pipeline(company_input)
+    on_event = _create_stream_handler()
+    result = run_pipeline(company_input, on_event=on_event)
     print(f"\nOpen your proposal: {result['proposal_path']}")
 
 
@@ -351,7 +430,8 @@ def example_mode():
         if 0 <= idx < len(EXAMPLE_PROSPECTS):
             prospect = EXAMPLE_PROSPECTS[idx]
             print(f"\nSelected: {prospect['name']}")
-            result = run_pipeline(prospect["input"])
+            on_event = _create_stream_handler()
+            result = run_pipeline(prospect["input"], on_event=on_event)
             print(f"\nOpen your proposal: {result['proposal_path']}")
         else:
             print("Invalid selection.")

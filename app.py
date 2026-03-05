@@ -185,10 +185,25 @@ with tab1:
                 deps = f" (after: {', '.join(d.value for d in step.depends_on)})" if step.depends_on else ""
                 st.write(f"**{step.agent.value.title()}** — {step.description}{deps}")
 
-        # Execute pipeline
+        # Execute pipeline with real-time streaming progress
         with st.status("Running pipeline...", expanded=True) as status:
-            status.update(label="Agent: Researcher — analyzing company...")
-            result = orchestrator.execute(company_input, plan)
+            def on_event(event, _status=status):
+                event_type = event.get("type")
+                agent = event.get("agent", "")
+                try:
+                    if event_type == "agent_start":
+                        _status.update(label=f"Agent: {agent.title()} — running...")
+                    elif event_type == "agent_end":
+                        duration = event.get("duration", 0)
+                        if event.get("success"):
+                            _status.update(label=f"{agent.title()} done ({duration:.1f}s) — next...")
+                    elif event_type == "tool_call":
+                        tool = event.get("tool", "")
+                        _status.update(label=f"Agent: {agent.title()} — calling {tool}...")
+                except Exception:
+                    pass  # Swallow thread-safety issues from parallel agents
+
+            result = orchestrator.execute(company_input, plan, on_event=on_event)
             status.update(label="Pipeline complete!", state="complete")
 
         st.session_state["sp_result"] = result
@@ -426,10 +441,21 @@ with tab2:
                 with st.status(
                     f"Generating proposal for {company_name[:30]}...", expanded=True
                 ) as s:
-                    # Use orchestrator for full pipeline
+                    def on_event(event, _status=s, _name=company_name):
+                        event_type = event.get("type")
+                        agent = event.get("agent", "")
+                        try:
+                            if event_type == "agent_start":
+                                _status.update(label=f"{_name[:20]} — {agent.title()}...")
+                            elif event_type == "tool_call":
+                                tool = event.get("tool", "")
+                                _status.update(label=f"{_name[:20]} — {agent.title()}: {tool}...")
+                        except Exception:
+                            pass
+
                     brief = format_prospect_for_agent(p)
                     orchestrator = Orchestrator(interactive=False)
-                    pipeline_result = orchestrator.execute(brief)
+                    pipeline_result = orchestrator.execute(brief, on_event=on_event)
 
                     s.update(label=f"Done: {company_name[:30]}", state="complete")
 
