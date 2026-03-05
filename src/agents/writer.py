@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from agents.base import SingleTurnAgent
+from agents.base import SingleTurnAgent, StreamCallback
 from models import AgentResult, AgentRole, ContextPacket, ProposalOutput
 
 
@@ -18,9 +18,9 @@ class WriterAgent(SingleTurnAgent):
     prompt_file = "writer.md"
     temperature = 0.7
 
-    def execute(self, context: ContextPacket) -> AgentResult:
+    def execute(self, context: ContextPacket, on_event: StreamCallback = None) -> AgentResult:
         """Execute and parse the output into proposal + email."""
-        result = super().execute(context)
+        result = super().execute(context, on_event=on_event)
         if not result.success:
             return result
 

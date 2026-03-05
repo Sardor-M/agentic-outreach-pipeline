@@ -141,14 +141,20 @@ class Orchestrator:
                     print(f"           └─ {s.agent.value.title()} — {s.description}")
         print()
 
-    def execute(self, task: str, plan: PipelinePlan | None = None) -> PipelineResult:
-        """Execute the full pipeline."""
+    def execute(self, task: str, plan: PipelinePlan | None = None, on_event=None) -> PipelineResult:
+        """Execute the full pipeline.
+
+        Args:
+            on_event: Optional streaming callback. When provided, all agent
+                      output is streamed via events instead of printed.
+        """
         start_time = time.time()
 
         if plan is None:
             plan = self.plan(task)
 
-        print(f"\nTarget: {plan.target_company}")
+        if not on_event:
+            print(f"\nTarget: {plan.target_company}")
 
         result = PipelineResult(target_company=plan.target_company, plan=plan)
         agent_outputs: dict[str, AgentResult] = {}
@@ -166,11 +172,11 @@ class Orchestrator:
                 step = steps[0]
                 context = self._build_context_for_agent(step.agent, task, agent_outputs)
                 agent = self._get_agent(step.agent)
-                agent_result = agent.run(context)
+                agent_result = agent.run(context, on_event=on_event)
                 agent_outputs[step.agent.value] = agent_result
             else:
                 # Parallel execution
-                self._execute_parallel(steps, task, agent_outputs)
+                self._execute_parallel(steps, task, agent_outputs, on_event=on_event)
 
         # Aggregate results
         result.agent_results = {k: v for k, v in agent_outputs.items()}
@@ -182,21 +188,31 @@ class Orchestrator:
             result.total_tokens_in += ar.tokens_in
             result.total_tokens_out += ar.tokens_out
 
-        print(f"\nTotal tokens: {result.total_tokens_in} in / {result.total_tokens_out} out")
-        print(f"Duration: {result.total_duration_seconds:.1f}s")
+        if on_event:
+            on_event({
+                "type": "pipeline_end",
+                "tokens_in": result.total_tokens_in,
+                "tokens_out": result.total_tokens_out,
+                "duration": result.total_duration_seconds,
+            })
+        else:
+            print(f"\nTotal tokens: {result.total_tokens_in} in / {result.total_tokens_out} out")
+            print(f"Duration: {result.total_duration_seconds:.1f}s")
 
         return result
 
     def _execute_parallel(
-        self, steps: list[PipelineStep], task: str, agent_outputs: dict[str, AgentResult]
+        self, steps: list[PipelineStep], task: str, agent_outputs: dict[str, AgentResult],
+        on_event=None,
     ):
         """Execute multiple steps in parallel using threads."""
-        print(f"\n  Running in parallel: {', '.join(s.agent.value for s in steps)}")
+        if not on_event:
+            print(f"\n  Running in parallel: {', '.join(s.agent.value for s in steps)}")
 
         def _run_step(step: PipelineStep) -> tuple[str, AgentResult]:
             context = self._build_context_for_agent(step.agent, task, agent_outputs)
             agent = self._get_agent(step.agent)
-            return step.agent.value, agent.run(context)
+            return step.agent.value, agent.run(context, on_event=on_event)
 
         with ThreadPoolExecutor(max_workers=len(steps)) as executor:
             futures = {executor.submit(_run_step, step): step for step in steps}
@@ -377,10 +393,10 @@ class Orchestrator:
 # ── Convenience functions (backward-compatible with old agents.py) ──
 
 
-def run_pipeline(company_input: str, output_dir: str = OUTPUTS_DIR) -> dict:
+def run_pipeline(company_input: str, output_dir: str = OUTPUTS_DIR, on_event=None) -> dict:
     """Run the full pipeline — backward-compatible with old agents.run_pipeline()."""
-    orchestrator = Orchestrator(interactive=True)
-    result = orchestrator.execute(company_input)
+    orchestrator = Orchestrator(interactive=not on_event)
+    result = orchestrator.execute(company_input, on_event=on_event)
     paths = orchestrator.save_results(result, output_dir)
 
     # Return dict matching old interface

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 
-from agents.base import SingleTurnAgent
+from agents.base import SingleTurnAgent, StreamCallback
 from models import AgentResult, AgentRole, ContextPacket, DealEstimate
 
 
@@ -19,9 +19,9 @@ class ScorerAgent(SingleTurnAgent):
     prompt_file = "scorer.md"
     temperature = 0.3
 
-    def execute(self, context: ContextPacket) -> AgentResult:
+    def execute(self, context: ContextPacket, on_event: StreamCallback = None) -> AgentResult:
         """Execute and parse the JSON output into DealEstimate."""
-        result = super().execute(context)
+        result = super().execute(context, on_event=on_event)
         if not result.success:
             return result
 

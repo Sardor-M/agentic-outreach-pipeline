@@ -7,6 +7,7 @@ Each agent:
 - Returns structured output
 - Loads its prompt template from config/agent_prompts/
 - Respects token budgets
+- Supports streaming via optional on_event callback
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from anthropic import Anthropic, APIError
 from dotenv import load_dotenv
@@ -28,6 +29,9 @@ load_dotenv(dotenv_path=env_path)
 PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "agent_prompts"
 MODEL = "claude-sonnet-4-20250514"
 MAX_RETRIES = 3
+
+# Callback for streaming events: {"type": "text_delta", "agent": "writer", "text": "..."}
+StreamCallback = Callable[[dict], None] | None
 
 
 def _load_prompt_template(filename: str) -> str:
@@ -125,15 +129,19 @@ class BaseAgent(ABC):
 
         return "\n".join(parts)
 
-    def call_llm(
+    # ── API calls ──
+
+    def _api_call(
         self,
         system_prompt: str,
-        user_message: str,
+        messages: list[dict],
         tools: list[dict] | None = None,
+        on_event: StreamCallback = None,
     ) -> tuple[Any, int, int]:
-        """Make a single Claude API call with retry logic.
+        """Make a Claude API call with retry logic and optional streaming.
 
-        Returns (response, tokens_in, tokens_out).
+        When on_event is provided, uses the streaming API and emits text_delta
+        events via callback. Returns (response, tokens_in, tokens_out).
         """
         for attempt in range(MAX_RETRIES):
             try:
@@ -142,12 +150,19 @@ class BaseAgent(ABC):
                     "max_tokens": self.max_tokens,
                     "temperature": self.temperature,
                     "system": system_prompt,
-                    "messages": [{"role": "user", "content": user_message}],
+                    "messages": messages,
                 }
                 if tools:
                     kwargs["tools"] = tools
 
-                response = self.client.messages.create(**kwargs)
+                if on_event:
+                    with self.client.messages.stream(**kwargs) as stream:
+                        for event in stream:
+                            self._handle_stream_event(event, on_event)
+                        response = stream.get_final_message()
+                else:
+                    response = self.client.messages.create(**kwargs)
+
                 return response, response.usage.input_tokens, response.usage.output_tokens
 
             except APIError as e:
@@ -155,7 +170,10 @@ class BaseAgent(ABC):
                 if "rate_limit" in error_msg.lower() or "overloaded" in error_msg.lower():
                     wait = 2**attempt * 10
                     if attempt < MAX_RETRIES - 1:
-                        print(f"  Rate limited. Waiting {wait}s ({attempt + 1}/{MAX_RETRIES})...")
+                        if on_event:
+                            on_event({"type": "retry", "agent": self.role.value, "wait": wait})
+                        else:
+                            print(f"  Rate limited. Waiting {wait}s ({attempt + 1}/{MAX_RETRIES})...")
                         time.sleep(wait)
                         continue
                     raise
@@ -163,30 +181,76 @@ class BaseAgent(ABC):
 
         raise RuntimeError(f"Max retries ({MAX_RETRIES}) exceeded")
 
+    def _handle_stream_event(self, event, on_event):
+        """Convert raw SDK stream events to text_delta callbacks."""
+        event_type = getattr(event, "type", "")
+        if event_type == "content_block_delta":
+            delta = getattr(event, "delta", None)
+            if delta and hasattr(delta, "text"):
+                on_event({
+                    "type": "text_delta",
+                    "agent": self.role.value,
+                    "text": delta.text,
+                })
+
+    def call_llm(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tools: list[dict] | None = None,
+    ) -> tuple[Any, int, int]:
+        """Make a single Claude API call with retry logic (non-streaming).
+
+        Returns (response, tokens_in, tokens_out).
+        """
+        return self._api_call(
+            system_prompt,
+            [{"role": "user", "content": user_message}],
+            tools,
+        )
+
+    # ── Execution ──
+
     @abstractmethod
-    def execute(self, context: ContextPacket) -> AgentResult:
+    def execute(self, context: ContextPacket, on_event: StreamCallback = None) -> AgentResult:
         """Execute the agent with the given context. Must be implemented by subclasses."""
         ...
 
-    def run(self, context: ContextPacket) -> AgentResult:
+    def run(self, context: ContextPacket, on_event: StreamCallback = None) -> AgentResult:
         """Public entry point — wraps execute() with timing and error handling."""
-        print(f"\nAgent: {self.role.value.title()}")
-        print(f"Task: {context.task_description[:120]}...")
+        if on_event:
+            on_event({"type": "agent_start", "agent": self.role.value, "task": context.task_description[:120]})
+        else:
+            print(f"\nAgent: {self.role.value.title()}")
+            print(f"Task: {context.task_description[:120]}...")
 
         start = time.time()
         try:
-            result = self.execute(context)
+            result = self.execute(context, on_event=on_event)
             result.duration_seconds = time.time() - start
-            print(
-                f"Done ({result.tokens_in} in / {result.tokens_out} out tokens, "
-                f"{result.duration_seconds:.1f}s)"
-            )
+            if on_event:
+                on_event({
+                    "type": "agent_end",
+                    "agent": self.role.value,
+                    "tokens_in": result.tokens_in,
+                    "tokens_out": result.tokens_out,
+                    "duration": result.duration_seconds,
+                    "success": result.success,
+                })
+            else:
+                print(
+                    f"Done ({result.tokens_in} in / {result.tokens_out} out tokens, "
+                    f"{result.duration_seconds:.1f}s)"
+                )
             return result
         except SystemExit:
             raise
         except Exception as e:
             duration = time.time() - start
-            print(f"Error: {e}")
+            if on_event:
+                on_event({"type": "agent_error", "agent": self.role.value, "error": str(e)})
+            else:
+                print(f"Error: {e}")
             return AgentResult(
                 agent=self.role,
                 success=False,
@@ -198,11 +262,15 @@ class BaseAgent(ABC):
 class SingleTurnAgent(BaseAgent):
     """Agent that makes a single LLM call (no tool use)."""
 
-    def execute(self, context: ContextPacket) -> AgentResult:
+    def execute(self, context: ContextPacket, on_event: StreamCallback = None) -> AgentResult:
         system_prompt = self.build_system_prompt(context)
         user_message = self.build_user_message(context)
 
-        response, tokens_in, tokens_out = self.call_llm(system_prompt, user_message)
+        response, tokens_in, tokens_out = self._api_call(
+            system_prompt,
+            [{"role": "user", "content": user_message}],
+            on_event=on_event,
+        )
 
         raw_text = ""
         for block in response.content:

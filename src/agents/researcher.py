@@ -4,7 +4,8 @@ Researcher Agent — Multi-turn agentic research with tool use.
 The only truly multi-turn agent. Uses search, scraping, and knowledge
 base tools autonomously. Context is pruned between turns.
 
-Ported from agents.py:call_agentic_researcher() with added context management.
+Supports streaming via on_event callback for real-time tool call
+and text generation visibility.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import json
 
 from anthropic import APIError
 
-from agents.base import BaseAgent
+from agents.base import BaseAgent, StreamCallback
 from context import ContextManager
 from models import AgentResult, AgentRole, ContextPacket
 from tools.knowledge_query import KnowledgeQueryTool
@@ -67,7 +68,7 @@ class ResearcherAgent(BaseAgent):
         else:
             return f"Unknown tool: {tool_name}"
 
-    def execute(self, context: ContextPacket) -> AgentResult:
+    def execute(self, context: ContextPacket, on_event: StreamCallback = None) -> AgentResult:
         """Multi-turn agentic research loop with context pruning."""
         system_prompt = self.build_system_prompt(context)
         user_message = self.build_user_message(context)
@@ -86,32 +87,38 @@ class ResearcherAgent(BaseAgent):
         total_out = 0
 
         try:
-            return self._agentic_loop(system_prompt, messages, total_in, total_out)
+            return self._agentic_loop(system_prompt, messages, total_in, total_out, on_event)
         except (SystemExit, KeyboardInterrupt):
             raise
         except Exception as e:
             # Fallback to legacy single-turn mode
-            print(f"\n  Warning: Agentic research failed ({e}). Falling back to legacy mode.")
+            if on_event:
+                on_event({"type": "fallback", "agent": self.role.value, "error": str(e)})
+            else:
+                print(f"\n  Warning: Agentic research failed ({e}). Falling back to legacy mode.")
             return self._legacy_research(context, user_message)
 
     def _agentic_loop(
-        self, system_prompt: str, messages: list, total_in: int, total_out: int
+        self,
+        system_prompt: str,
+        messages: list,
+        total_in: int,
+        total_out: int,
+        on_event: StreamCallback = None,
     ) -> AgentResult:
         """Run the multi-turn tool-use loop."""
         for turn in range(self.max_turns):
-            print(f"  Turn {turn + 1}/{self.max_turns}")
+            if on_event:
+                on_event({"type": "turn", "agent": self.role.value, "turn": turn + 1, "max_turns": self.max_turns})
+            else:
+                print(f"  Turn {turn + 1}/{self.max_turns}")
 
             # Prune context if needed
             messages = self.context_manager.prune_messages(messages)
 
             try:
-                response = self.client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    system=system_prompt,
-                    tools=self.tools,
-                    messages=messages,
+                response, t_in, t_out = self._api_call(
+                    system_prompt, messages, tools=self.tools, on_event=on_event,
                 )
             except APIError as e:
                 error_msg = str(e)
@@ -124,8 +131,8 @@ class ResearcherAgent(BaseAgent):
                 else:
                     raise
 
-            total_in += response.usage.input_tokens
-            total_out += response.usage.output_tokens
+            total_in += t_in
+            total_out += t_out
 
             if response.stop_reason == "tool_use":
                 tool_results = []
@@ -134,13 +141,31 @@ class ResearcherAgent(BaseAgent):
                         tool_name = block.name
                         tool_input = block.input
                         tool_id = block.id
-                        print(f"  Tool: {tool_name}({json.dumps(tool_input)[:80]})")
+
+                        if on_event:
+                            on_event({
+                                "type": "tool_call",
+                                "agent": self.role.value,
+                                "tool": tool_name,
+                                "input": tool_input,
+                            })
+                        else:
+                            print(f"  Tool: {tool_name}({json.dumps(tool_input)[:80]})")
 
                         result = self._execute_tool(tool_name, tool_input)
 
                         # Summarize tool results instead of blind truncation
                         result = self.context_manager.summarize_tool_result(tool_name, result)
-                        print(f"  Result: {result[:80]}")
+
+                        if on_event:
+                            on_event({
+                                "type": "tool_result",
+                                "agent": self.role.value,
+                                "tool": tool_name,
+                                "result_preview": result[:120],
+                            })
+                        else:
+                            print(f"  Result: {result[:80]}")
 
                         tool_results.append({
                             "type": "tool_result",
@@ -157,7 +182,9 @@ class ResearcherAgent(BaseAgent):
                     if hasattr(block, "text"):
                         final_text += block.text
 
-                print(f"  Research complete ({total_in} in / {total_out} out, {turn + 1} turns)")
+                if not on_event:
+                    print(f"  Research complete ({total_in} in / {total_out} out, {turn + 1} turns)")
+
                 return AgentResult(
                     agent=self.role,
                     success=True,
@@ -167,7 +194,11 @@ class ResearcherAgent(BaseAgent):
                 )
 
         # Hit max turns — ask for final summary
-        print(f"  Max turns ({self.max_turns}) reached. Extracting final response.")
+        if on_event:
+            on_event({"type": "max_turns", "agent": self.role.value, "turns": self.max_turns})
+        else:
+            print(f"  Max turns ({self.max_turns}) reached. Extracting final response.")
+
         messages.append({
             "role": "user",
             "content": (
@@ -177,15 +208,11 @@ class ResearcherAgent(BaseAgent):
         })
 
         try:
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                system=system_prompt,
-                messages=messages,
+            response, t_in, t_out = self._api_call(
+                system_prompt, messages, on_event=on_event,
             )
-            total_in += response.usage.input_tokens
-            total_out += response.usage.output_tokens
+            total_in += t_in
+            total_out += t_out
             final_text = response.content[0].text
 
             return AgentResult(
