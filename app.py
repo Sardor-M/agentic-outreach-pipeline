@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 
@@ -10,11 +9,9 @@ load_dotenv()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 from knowledge.product_loader import COMPANY_CONFIG, PRODUCTS_CONFIG
-from orchestrator import (
-    Orchestrator,
-    run_deal_estimator,
-    run_quick_summary,
-)
+from agents.scorer import ScorerAgent
+from context import ContextManager
+from orchestrator import Orchestrator
 from tools.contact_finder import find_prospects
 from tools.email_sender import is_configured as gmail_configured
 from tools.email_sender import send_outreach_email
@@ -85,30 +82,7 @@ with st.sidebar:
 # ── Helpers ──
 
 
-def _parse_deal_json(raw: str) -> dict:
-    """Safely parse deal estimator JSON output."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = "\n".join(text.split("\n")[1:])
-    if text.endswith("```"):
-        text = "\n".join(text.split("\n")[:-1])
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {
-            "company_name": "Unknown",
-            "industry": "Unknown",
-            "estimated_machines": 0,
-            "first_year_value": 0,
-            "annual_recurring": 0,
-            "deal_category": "Unknown",
-            "confidence": "Low",
-            "reasoning": f"Could not parse: {raw[:100]}",
-        }
-
-
-def format_prospect_for_agent(prospect: dict) -> str:
+def _format_prospect(prospect: dict) -> str:
     """Format a prospect dict into a text block for agents."""
     email_str = ", ".join(prospect["emails"]) if prospect.get("emails") else "Not found"
     phone_str = ", ".join(prospect["phones"]) if prospect.get("phones") else "Not found"
@@ -354,17 +328,20 @@ with tab2:
             st.warning("No companies found. Try a different search query.")
         else:
             deals = []
-            summaries = []
             progress = st.progress(0, text="Qualifying prospects...")
 
-            for i, p in enumerate(prospects):
-                brief = format_prospect_for_agent(p)
-                raw = run_deal_estimator(brief)
-                deal = _parse_deal_json(raw)
-                deals.append(deal)
+            cm = ContextManager()
+            scorer = ScorerAgent(cm)
 
-                summary = run_quick_summary(brief, json.dumps(deal, indent=2))
-                summaries.append(summary)
+            for i, p in enumerate(prospects):
+                brief = _format_prospect(p)
+                context = cm.build_context_packet(
+                    task_description=f"Estimate the deal size for this prospect:\n\n{brief}",
+                    relevant_data={},
+                    company_config=COMPANY_CONFIG,
+                )
+                result = scorer.run(context)
+                deals.append(result.output if result.output else {})
 
                 progress.progress(
                     (i + 1) / len(prospects),
@@ -375,7 +352,6 @@ with tab2:
 
             st.session_state["ps_prospects"] = prospects
             st.session_state["ps_deals"] = deals
-            st.session_state["ps_summaries"] = summaries
             st.session_state["ps_search_done"] = True
             st.session_state.pop("ps_proposals", None)
             st.session_state.pop("ps_batch_done", None)
@@ -384,7 +360,6 @@ with tab2:
     if st.session_state.get("ps_search_done"):
         prospects = st.session_state["ps_prospects"]
         deals = st.session_state["ps_deals"]
-        summaries = st.session_state["ps_summaries"]
 
         st.subheader("Prospect Pipeline")
 
@@ -405,12 +380,6 @@ with tab2:
 
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True, hide_index=True)
-
-        with st.expander("Quick Assessments", expanded=False):
-            for i, (p, summary) in enumerate(zip(prospects, summaries)):
-                st.markdown(f"**{i + 1}. {p['title'][:40]}**")
-                st.write(summary)
-                st.write("---")
 
         # Selection
         options = [f"{i + 1}. {p['title'][:40]}" for i, p in enumerate(prospects)]
@@ -453,7 +422,7 @@ with tab2:
                         except Exception:
                             pass
 
-                    brief = format_prospect_for_agent(p)
+                    brief = _format_prospect(p)
                     orchestrator = Orchestrator(interactive=False)
                     pipeline_result = orchestrator.execute(brief, on_event=on_event)
 

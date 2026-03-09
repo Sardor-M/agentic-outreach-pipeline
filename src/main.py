@@ -22,13 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = str(PROJECT_ROOT / "outputs")
 
-from orchestrator import (
-    Orchestrator,
-    run_deal_estimator,
-    run_email_writer,
-    run_pipeline,
-    run_researcher,
-)
+from orchestrator import Orchestrator
 from tools.contact_finder import find_prospects
 from tools.email_sender import is_configured as gmail_configured
 from tools.email_sender import parse_email_text, send_outreach_email
@@ -80,29 +74,6 @@ EXAMPLE_PROSPECTS = [
 
 
 # ── Helpers ──
-
-
-def _parse_deal_json(raw: str) -> dict:
-    """Safely parse deal estimator JSON output."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = "\n".join(text.split("\n")[1:])
-    if text.endswith("```"):
-        text = "\n".join(text.split("\n")[:-1])
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {
-            "company_name": "Unknown",
-            "industry": "Unknown",
-            "estimated_machines": 0,
-            "first_year_value": 0,
-            "annual_recurring": 0,
-            "deal_category": "Unknown",
-            "confidence": "Low",
-            "reasoning": f"Could not parse: {raw[:100]}",
-        }
 
 
 def _display_table(prospects: list[dict], deals: list[dict]):
@@ -164,7 +135,7 @@ def _get_user_selection(count: int) -> list[int]:
         return []
 
 
-def format_prospect_for_agent(prospect: dict) -> str:
+def _format_prospect(prospect: dict) -> str:
     """Format a prospect dict into a text block for agents."""
     email_str = ", ".join(prospect["emails"]) if prospect.get("emails") else "Not found"
     phone_str = ", ".join(prospect["phones"]) if prospect.get("phones") else "Not found"
@@ -259,6 +230,11 @@ def _create_stream_handler():
 
 def search_command(query: str):
     """Full search → estimate → email outreach pipeline."""
+    from agents.scorer import ScorerAgent
+    from agents.writer import WriterAgent
+    from context import ContextManager
+    from knowledge.product_loader import COMPANY_CONFIG
+
     print(f"\nQuery: {query}")
 
     # Step 1-2: Find prospects
@@ -267,13 +243,19 @@ def search_command(query: str):
         print("\nNo companies found. Try a different search query.")
         return
 
-    # Step 3: Estimate deals
+    # Step 3: Estimate deals using ScorerAgent directly
+    cm = ContextManager()
+    scorer = ScorerAgent(cm)
     deals = []
     for p in prospects:
-        brief = format_prospect_for_agent(p)
-        raw = run_deal_estimator(brief)
-        deal = _parse_deal_json(raw)
-        deals.append(deal)
+        brief = _format_prospect(p)
+        context = cm.build_context_packet(
+            task_description=f"Estimate the deal size for this prospect:\n\n{brief}",
+            relevant_data={},
+            company_config=COMPANY_CONFIG,
+        )
+        result = scorer.run(context)
+        deals.append(result.output if result.output else {})
 
     # Step 4: Display table
     _display_table(prospects, deals)
@@ -289,20 +271,24 @@ def search_command(query: str):
 
     print(f"\nSelected {len(selected_indices)} prospect(s). Starting outreach pipeline...\n")
 
-    # Step 6-7: Research + Write emails
+    # Step 6-7: Full pipeline for each selected prospect
     outreach_results = []
     for i, (prospect, deal) in enumerate(zip(selected_prospects, selected_deals)):
-        brief = format_prospect_for_agent(prospect)
-        research = run_researcher(brief)
-        deal_context = json.dumps(deal, indent=2)
-        email_text = run_email_writer(research, deal_context)
+        brief = _format_prospect(prospect)
+        on_event = _create_stream_handler()
+        orchestrator = Orchestrator(interactive=False)
+        pipeline_result = orchestrator.execute(brief, on_event=on_event)
+
+        email_text = ""
+        if pipeline_result.proposal:
+            email_text = f"Subject: {pipeline_result.proposal.email_subject}\n\n{pipeline_result.proposal.email_body}"
 
         to_email = prospect["emails"][0] if prospect["emails"] else None
 
         outreach_results.append({
             "prospect": prospect,
             "deal": deal,
-            "research": research,
+            "research": pipeline_result.research_brief.raw_brief if pipeline_result.research_brief else "",
             "email_text": email_text,
             "to_email": to_email,
         })
@@ -382,8 +368,10 @@ def plan_command(company_input: str):
 def proposal_command(company_input: str):
     """Generate a full proposal with real-time streaming progress."""
     on_event = _create_stream_handler()
-    result = run_pipeline(company_input, on_event=on_event)
-    print(f"\nOpen your proposal: {result['proposal_path']}")
+    orchestrator = Orchestrator(interactive=not on_event)
+    result = orchestrator.execute(company_input, on_event=on_event)
+    paths = orchestrator.save_results(result)
+    print(f"\nOpen your proposal: {paths.get('proposal', 'N/A')}")
 
 
 def interactive_mode():
@@ -408,8 +396,10 @@ def interactive_mode():
         return
 
     on_event = _create_stream_handler()
-    result = run_pipeline(company_input, on_event=on_event)
-    print(f"\nOpen your proposal: {result['proposal_path']}")
+    orchestrator = Orchestrator(interactive=not on_event)
+    result = orchestrator.execute(company_input, on_event=on_event)
+    paths = orchestrator.save_results(result)
+    print(f"\nOpen your proposal: {paths.get('proposal', 'N/A')}")
 
 
 def example_mode():
@@ -431,8 +421,10 @@ def example_mode():
             prospect = EXAMPLE_PROSPECTS[idx]
             print(f"\nSelected: {prospect['name']}")
             on_event = _create_stream_handler()
-            result = run_pipeline(prospect["input"], on_event=on_event)
-            print(f"\nOpen your proposal: {result['proposal_path']}")
+            orchestrator = Orchestrator(interactive=not on_event)
+            result = orchestrator.execute(prospect["input"], on_event=on_event)
+            paths = orchestrator.save_results(result)
+            print(f"\nOpen your proposal: {paths.get('proposal', 'N/A')}")
         else:
             print("Invalid selection.")
     except ValueError:
