@@ -1,8 +1,11 @@
 """
-Knowledge Query Tool — Query the structured JSON knowledge store.
+Knowledge Query Tool — Semantic search over the ChromaDB vector knowledge store.
 
-Replaces the old ChromaDB RAG query with field-based querying over
-the JSON knowledge store.
+Provides agents with access to product knowledge, case studies,
+ideal customer profiles, extracted company facts, and past outreach history
+via vector similarity search (embeddings).
+
+Falls back to keyword search over product config if ChromaDB is unavailable.
 """
 
 from __future__ import annotations
@@ -13,24 +16,26 @@ from tools.base import BaseTool
 class KnowledgeQueryTool(BaseTool):
     name = "query_knowledge_base"
     description = (
-        "Search the internal knowledge base. Contains product information, "
+        "Search the internal knowledge base using semantic similarity. "
+        "Contains product information (features, specs, benefits), "
         "case studies, ideal customer profiles, ROI data, and records of past "
         "outreach to other companies. Use this to find relevant product features, "
-        "similar past deals, and case studies."
+        "similar past deals, and case studies that match the prospect's situation."
     )
 
     def __init__(self):
         super().__init__()
         self._store = None
+        self._initialized = False
 
     @property
     def store(self):
-        if self._store is None:
+        if not self._initialized:
+            self._initialized = True
             try:
-                from knowledge.store import KnowledgeStore
+                from knowledge.store import get_knowledge_store
 
-                self._store = KnowledgeStore()
-                self._store.load()
+                self._store = get_knowledge_store()
             except Exception:
                 pass
         return self._store
@@ -42,8 +47,11 @@ class KnowledgeQueryTool(BaseTool):
                 "query": {
                     "type": "string",
                     "description": (
-                        "Search query. E.g., 'energy monitoring for forging companies' "
-                        "or 'past outreach automotive stamping'."
+                        "Natural language search query. The knowledge base uses "
+                        "semantic similarity, so describe what you're looking for "
+                        "in plain language. E.g., 'energy monitoring for forging companies', "
+                        "'past outreach to automotive stamping manufacturers', "
+                        "'defect detection case studies', or 'ROI data for medium factories'."
                     ),
                 },
             },
@@ -54,25 +62,33 @@ class KnowledgeQueryTool(BaseTool):
         if not query:
             return "Error: No query provided."
 
-        if self.store is None:
-            # Fallback: return product info from YAML config
-            return self._fallback_query(query)
+        if self.store is not None:
+            results = self.store.query(query)
+            if results:
+                return self._format_vector_results(results)
 
-        results = self.store.query(query)
-        if not results:
-            return self._fallback_query(query)
+        # Fallback: product context with keyword filtering
+        return self._fallback_query(query)
 
+    def _format_vector_results(self, results: list[dict]) -> str:
+        """Format ChromaDB vector search results for agent consumption."""
         parts = []
         for i, record in enumerate(results[:5]):
             category = record.get("category", "unknown")
             text = record.get("text", "")
             source = record.get("source", "knowledge")
-            parts.append(f"[Result {i + 1}] (source: {source}, category: {category})\n{text}")
+            distance = record.get("distance", 0)
+            similarity = max(0, 1 - distance / 2)  # Normalize to 0-1 range
+
+            parts.append(
+                f"[Result {i + 1}] (source: {source}, category: {category}, "
+                f"relevance: {similarity:.0%})\n{text}"
+            )
 
         return "\n\n".join(parts)
 
     def _fallback_query(self, query: str) -> str:
-        """Fallback to product loader when knowledge store isn't available."""
+        """Fallback to product loader when vector store isn't available."""
         from knowledge.product_loader import get_full_product_context
 
         context = get_full_product_context()

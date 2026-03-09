@@ -1,10 +1,11 @@
 """
-Structured Extractor — Uses LangExtract (Gemini) for web page fact extraction.
+Structured Extractor — Extracts structured facts from web page text.
 
-Replaces ChromaDB's unstructured embedding approach with structured extraction.
-Every extracted fact is grounded to its source text.
+Uses LangExtract (Gemini) for AI-powered extraction if GOOGLE_API_KEY is set.
+Falls back to regex-based extraction otherwise.
 
-Falls back to regex-based extraction if LangExtract/Gemini is unavailable.
+Extracted facts are stored as CompanyFact models and can be indexed into
+the ChromaDB vector store for semantic search.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ Runs in parallel with Architect (both depend on Research, not each other).
 
 from __future__ import annotations
 
-from agents.base import SingleTurnAgent
+from agents.base import FALLBACK_MODEL, SingleTurnAgent
 from models import AgentRole
 
 
@@ -15,3 +15,4 @@ class AnalystAgent(SingleTurnAgent):
     role = AgentRole.ANALYST
     prompt_file = "analyst.md"
     temperature = 0.5
+    fallback_model = FALLBACK_MODEL

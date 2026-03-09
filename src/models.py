@@ -94,6 +94,10 @@ class ResearchBrief(BaseModel):
     manufacturing_process: str = ""
     decision_factors: list[str] = Field(default_factory=list)
     raw_brief: str = Field(default="", description="Full text research brief for downstream agents")
+    sources_used: list[str] = Field(default_factory=list)
+    facts_verified: int = 0
+    facts_inferred: int = 0
+    research_confidence: float = 0.0
 
 
 class CompetitiveAnalysis(BaseModel):
@@ -153,6 +157,7 @@ class PipelineStep(BaseModel):
     parallel_group: int = Field(default=0, description="Steps with same group run concurrently")
     depends_on: list[AgentRole] = Field(default_factory=list)
     description: str = ""
+    criticality: str = Field(default="required", description="'required' or 'optional'")
 
 
 class PipelinePlan(BaseModel):
@@ -191,6 +196,7 @@ class PipelineResult(BaseModel):
     total_tokens_in: int = 0
     total_tokens_out: int = 0
     total_duration_seconds: float = 0.0
+    cost_report: dict[str, Any] = Field(default_factory=dict)
     timestamp: str = Field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
 
 

@@ -1,82 +1,76 @@
 """
-Writer Agent — Proposal and cold email generation.
+Writer Agent — Proposal and cold email generation with structured output.
 
-Single-turn agent that generates both the sales proposal (Markdown)
-and the cold outreach email from the solution map summary.
+Uses Claude's tool_choice to guarantee structured proposal + email output.
 """
 
 from __future__ import annotations
 
-import re
+from agents.base import BaseAgent, StreamCallback
+from models import AgentResult, AgentRole, ContextPacket
 
-from agents.base import SingleTurnAgent, StreamCallback
-from models import AgentResult, AgentRole, ContextPacket, ProposalOutput
+PROPOSAL_TOOL = {
+    "name": "submit_proposal",
+    "description": "Submit the sales proposal and cold email for this prospect.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "proposal_markdown": {
+                "type": "string",
+                "description": "The full sales proposal in Markdown format",
+            },
+            "email_subject": {
+                "type": "string",
+                "description": "Subject line for the cold email",
+            },
+            "email_body": {
+                "type": "string",
+                "description": "Body of the cold email (plain text, no markdown)",
+            },
+        },
+        "required": ["proposal_markdown", "email_subject", "email_body"],
+    },
+}
 
 
-class WriterAgent(SingleTurnAgent):
+class WriterAgent(BaseAgent):
     role = AgentRole.WRITER
     prompt_file = "writer.md"
     temperature = 0.7
 
     def execute(self, context: ContextPacket, on_event: StreamCallback = None) -> AgentResult:
-        """Execute and parse the output into proposal + email."""
-        result = super().execute(context, on_event=on_event)
-        if not result.success:
-            return result
+        """Execute with forced tool use for guaranteed structured output."""
+        system_prompt = self.build_system_prompt(context)
+        user_message = self.build_user_message(context)
 
-        # Parse the raw text to extract proposal and email separately
-        raw = result.raw_text
-        proposal_output = self._parse_output(raw)
+        response, tokens_in, tokens_out = self._api_call(
+            system_prompt,
+            [{"role": "user", "content": user_message}],
+            tools=[PROPOSAL_TOOL],
+            tool_choice={"type": "tool", "name": "submit_proposal"},
+            on_event=on_event,
+        )
 
-        result.output = {
-            "proposal_markdown": proposal_output.proposal_markdown,
-            "email_subject": proposal_output.email_subject,
-            "email_body": proposal_output.email_body,
-        }
+        # Extract structured input directly from tool use block
+        for block in response.content:
+            if block.type == "tool_use":
+                return AgentResult(
+                    agent=self.role,
+                    success=True,
+                    output={
+                        "proposal_markdown": block.input.get("proposal_markdown", ""),
+                        "email_subject": block.input.get("email_subject", ""),
+                        "email_body": block.input.get("email_body", ""),
+                    },
+                    raw_text=block.input.get("proposal_markdown", ""),
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                )
 
-        return result
-
-    def _parse_output(self, raw: str) -> ProposalOutput:
-        """Split raw output into proposal markdown and email."""
-        # Try to find the email section
-        # Common markers: "## OUTPUT 2", "Subject:", email section after proposal
-        email_markers = [
-            r"##\s*OUTPUT\s*2[:\s]*COLD\s*EMAIL",
-            r"##\s*Cold\s*Email",
-            r"---\s*\n\s*Subject:",
-        ]
-
-        proposal = raw
-        email_subject = ""
-        email_body = ""
-
-        for pattern in email_markers:
-            match = re.search(pattern, raw, re.IGNORECASE)
-            if match:
-                proposal = raw[: match.start()].strip()
-                email_section = raw[match.end() :].strip()
-
-                # Extract subject line
-                subj_match = re.match(r"^.*?Subject:\s*(.+?)(?:\n\n|\n)", email_section, re.DOTALL)
-                if subj_match:
-                    email_subject = subj_match.group(1).strip()
-                    email_body = email_section[subj_match.end() :].strip()
-                else:
-                    email_body = email_section
-                break
-
-        # If no split found, check if email is at the end with "Subject:" marker
-        if not email_subject:
-            subj_match = re.search(r"\nSubject:\s*(.+?)(?:\n\n|\n)", raw)
-            if subj_match:
-                # Check if this subject line is in the second half of the text
-                if subj_match.start() > len(raw) * 0.4:
-                    proposal = raw[: subj_match.start()].strip()
-                    email_subject = subj_match.group(1).strip()
-                    email_body = raw[subj_match.end() :].strip()
-
-        return ProposalOutput(
-            proposal_markdown=proposal,
-            email_subject=email_subject,
-            email_body=email_body,
+        return AgentResult(
+            agent=self.role,
+            success=False,
+            error="No tool use block in response",
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
         )

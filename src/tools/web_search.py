@@ -11,7 +11,10 @@ import re
 
 from ddgs import DDGS
 
+from logging_config import get_logger
 from tools.base import BaseTool
+
+logger = get_logger(__name__)
 
 # Domains that are never real company websites
 IRRELEVANT_DOMAINS = {
@@ -128,13 +131,13 @@ def search_companies(query: str, max_results: int = 10) -> list[dict]:
     ):
         enhanced = f"{query} manufacturer company"
 
-    print(f"\n  Searching DuckDuckGo: '{enhanced}'")
+    logger.info("searching", engine="DuckDuckGo", query=enhanced)
 
     ddgs = DDGS()
     try:
         results = list(ddgs.text(enhanced, max_results=max_results * 2))
     except Exception as e:
-        print(f"  Search error: {e}")
+        logger.error("search_error", error=str(e))
         return []
 
     companies = []
@@ -163,5 +166,5 @@ def search_companies(query: str, max_results: int = 10) -> list[dict]:
         if len(companies) >= max_results:
             break
 
-    print(f"  Found {len(companies)} unique company results")
+    logger.info("search_results", count=len(companies))
     return companies

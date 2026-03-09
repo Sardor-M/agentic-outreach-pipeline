@@ -16,7 +16,11 @@ from anthropic import APIError
 
 from agents.base import BaseAgent, StreamCallback
 from context import ContextManager
+from knowledge.product_loader import COMPANY_CONFIG
+from logging_config import get_logger
 from models import AgentResult, AgentRole, ContextPacket
+
+logger = get_logger(__name__)
 from tools.knowledge_query import KnowledgeQueryTool
 from tools.web_scraper import WebScraperTool
 from tools.web_search import WebSearchTool
@@ -46,8 +50,8 @@ class ResearcherAgent(BaseAgent):
     temperature = 0.6
     max_turns = 5
 
-    def __init__(self, context_manager: ContextManager | None = None):
-        super().__init__(context_manager)
+    def __init__(self, context_manager: ContextManager | None = None, **kwargs):
+        super().__init__(context_manager, **kwargs)
         self.web_search = WebSearchTool()
         self.web_scraper = WebScraperTool()
         self.knowledge_query = KnowledgeQueryTool()
@@ -56,6 +60,13 @@ class ResearcherAgent(BaseAgent):
             self.web_scraper.get_tool_definition(),
             self.knowledge_query.get_tool_definition(),
         ]
+        self._checkpoint = None
+        self._sources_used: list[str] = []
+
+        # Set max_turns from config research depth
+        depth = COMPANY_CONFIG.get("research", {}).get("depth", "standard")
+        depth_map = {"quick": 2, "standard": 5, "deep": 8}
+        self.max_turns = depth_map.get(depth, 5)
 
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         """Dispatch a tool call to the actual function."""
@@ -91,11 +102,28 @@ class ResearcherAgent(BaseAgent):
         except (SystemExit, KeyboardInterrupt):
             raise
         except Exception as e:
+            # Try partial recovery from checkpoint if we completed at least 2 turns
+            if self._checkpoint and self._checkpoint["turn"] >= 1:
+                cp = self._checkpoint
+                partial_text = ""
+                for block in cp["response"].content:
+                    if hasattr(block, "text"):
+                        partial_text += block.text
+                if partial_text.strip():
+                    logger.warning("research_partial_recovery", turns=cp["turn"] + 1, error=str(e))
+                    return AgentResult(
+                        agent=self.role,
+                        success=True,
+                        raw_text=partial_text,
+                        tokens_in=cp["tokens_in"],
+                        tokens_out=cp["tokens_out"],
+                    )
+
             # Fallback to legacy single-turn mode
             if on_event:
                 on_event({"type": "fallback", "agent": self.role.value, "error": str(e)})
             else:
-                print(f"\n  Warning: Agentic research failed ({e}). Falling back to legacy mode.")
+                logger.warning("research_fallback", agent=self.role.value, error=str(e))
             return self._legacy_research(context, user_message)
 
     def _agentic_loop(
@@ -111,7 +139,7 @@ class ResearcherAgent(BaseAgent):
             if on_event:
                 on_event({"type": "turn", "agent": self.role.value, "turn": turn + 1, "max_turns": self.max_turns})
             else:
-                print(f"  Turn {turn + 1}/{self.max_turns}")
+                logger.info("research_turn", turn=turn + 1, max_turns=self.max_turns)
 
             # Prune context if needed
             messages = self.context_manager.prune_messages(messages)
@@ -123,16 +151,25 @@ class ResearcherAgent(BaseAgent):
             except APIError as e:
                 error_msg = str(e)
                 if "credit balance" in error_msg.lower() or "billing" in error_msg.lower():
-                    print("Error: API billing — credit balance is too low.")
+                    logger.error("api_billing_error", error=error_msg)
                     raise SystemExit(1)
                 elif "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
-                    print("Error: API key invalid.")
+                    logger.error("api_auth_error", error=error_msg)
                     raise SystemExit(1)
                 else:
                     raise
 
             total_in += t_in
             total_out += t_out
+
+            # Save checkpoint after each successful API call
+            self._checkpoint = {
+                "turn": turn,
+                "messages": [m.copy() if isinstance(m, dict) else m for m in messages],
+                "tokens_in": total_in,
+                "tokens_out": total_out,
+                "response": response,
+            }
 
             if response.stop_reason == "tool_use":
                 tool_results = []
@@ -150,9 +187,10 @@ class ResearcherAgent(BaseAgent):
                                 "input": tool_input,
                             })
                         else:
-                            print(f"  Tool: {tool_name}({json.dumps(tool_input)[:80]})")
+                            logger.info("tool_call", tool=tool_name, input=json.dumps(tool_input)[:80])
 
                         result = self._execute_tool(tool_name, tool_input)
+                        self._sources_used.append(f"{tool_name}:{json.dumps(tool_input)[:60]}")
 
                         # Summarize tool results instead of blind truncation
                         result = self.context_manager.summarize_tool_result(tool_name, result)
@@ -165,7 +203,7 @@ class ResearcherAgent(BaseAgent):
                                 "result_preview": result[:120],
                             })
                         else:
-                            print(f"  Result: {result[:80]}")
+                            logger.debug("tool_result", tool=tool_name, result=result[:80])
 
                         tool_results.append({
                             "type": "tool_result",
@@ -182,8 +220,34 @@ class ResearcherAgent(BaseAgent):
                     if hasattr(block, "text"):
                         final_text += block.text
 
+                # Inject reflection prompt if we have turns left
+                if turn < self.max_turns - 1 and not getattr(self, "_reflected", False):
+                    self._reflected = True
+                    messages.append({"role": "assistant", "content": response.content})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Review your research. What gaps remain? What's verified vs inferred? "
+                            "Rate your confidence 0-1. Then produce your final research brief."
+                        ),
+                    })
+                    try:
+                        ref_response, ref_in, ref_out = self._api_call(
+                            system_prompt, messages, on_event=on_event,
+                        )
+                        total_in += ref_in
+                        total_out += ref_out
+                        reflection_text = ""
+                        for block in ref_response.content:
+                            if hasattr(block, "text"):
+                                reflection_text += block.text
+                        if reflection_text.strip():
+                            final_text = reflection_text
+                    except Exception:
+                        pass  # Use original final_text if reflection fails
+
                 if not on_event:
-                    print(f"  Research complete ({total_in} in / {total_out} out, {turn + 1} turns)")
+                    logger.info("research_complete", tokens_in=total_in, tokens_out=total_out, turns=turn + 1)
 
                 return AgentResult(
                     agent=self.role,
@@ -191,13 +255,14 @@ class ResearcherAgent(BaseAgent):
                     raw_text=final_text,
                     tokens_in=total_in,
                     tokens_out=total_out,
+                    output={"sources_used": self._sources_used},
                 )
 
         # Hit max turns — ask for final summary
         if on_event:
             on_event({"type": "max_turns", "agent": self.role.value, "turns": self.max_turns})
         else:
-            print(f"  Max turns ({self.max_turns}) reached. Extracting final response.")
+            logger.info("max_turns_reached", turns=self.max_turns)
 
         messages.append({
             "role": "user",

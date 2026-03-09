@@ -21,13 +21,18 @@ from anthropic import Anthropic, APIError
 from dotenv import load_dotenv
 
 from context import ContextManager, count_tokens
+from cost_tracker import CostTracker
+from logging_config import get_logger
 from models import AgentResult, AgentRole, ContextPacket
+
+logger = get_logger(__name__)
 
 env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "agent_prompts"
 MODEL = "claude-sonnet-4-20250514"
+FALLBACK_MODEL = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 3
 
 # Callback for streaming events: {"type": "text_delta", "agent": "writer", "text": "..."}
@@ -49,9 +54,15 @@ class BaseAgent(ABC):
     prompt_file: str  # e.g., "researcher.md"
     temperature: float = 0.7
     max_tokens: int = 4096
+    fallback_model: str | None = None
 
-    def __init__(self, context_manager: ContextManager | None = None):
+    def __init__(
+        self,
+        context_manager: ContextManager | None = None,
+        cost_tracker: CostTracker | None = None,
+    ):
         self.context_manager = context_manager or ContextManager()
+        self.cost_tracker = cost_tracker
         self._client: Anthropic | None = None
         self._prompt_template: str | None = None
 
@@ -136,6 +147,7 @@ class BaseAgent(ABC):
         system_prompt: str,
         messages: list[dict],
         tools: list[dict] | None = None,
+        tool_choice: dict | None = None,
         on_event: StreamCallback = None,
     ) -> tuple[Any, int, int]:
         """Make a Claude API call with retry logic and optional streaming.
@@ -154,6 +166,8 @@ class BaseAgent(ABC):
                 }
                 if tools:
                     kwargs["tools"] = tools
+                if tool_choice:
+                    kwargs["tool_choice"] = tool_choice
 
                 if on_event:
                     with self.client.messages.stream(**kwargs) as stream:
@@ -163,7 +177,14 @@ class BaseAgent(ABC):
                 else:
                     response = self.client.messages.create(**kwargs)
 
-                return response, response.usage.input_tokens, response.usage.output_tokens
+                tokens_in = response.usage.input_tokens
+                tokens_out = response.usage.output_tokens
+
+                if self.cost_tracker:
+                    model = kwargs.get("model", MODEL)
+                    self.cost_tracker.record(self.role.value, model, tokens_in, tokens_out)
+
+                return response, tokens_in, tokens_out
 
             except APIError as e:
                 error_msg = str(e)
@@ -173,10 +194,15 @@ class BaseAgent(ABC):
                         if on_event:
                             on_event({"type": "retry", "agent": self.role.value, "wait": wait})
                         else:
-                            print(f"  Rate limited. Waiting {wait}s ({attempt + 1}/{MAX_RETRIES})...")
+                            logger.warning("rate_limited", agent=self.role.value, wait=wait, attempt=attempt + 1)
                         time.sleep(wait)
                         continue
                     raise
+                # Non-rate-limit error: try fallback model once
+                if self.fallback_model and kwargs.get("model") != self.fallback_model:
+                    logger.warning("fallback_model", agent=self.role.value, model=self.fallback_model, error=error_msg)
+                    kwargs["model"] = self.fallback_model
+                    continue
                 raise
 
         raise RuntimeError(f"Max retries ({MAX_RETRIES}) exceeded")
@@ -191,6 +217,12 @@ class BaseAgent(ABC):
                     "type": "text_delta",
                     "agent": self.role.value,
                     "text": delta.text,
+                })
+            elif delta and hasattr(delta, "partial_json"):
+                on_event({
+                    "type": "input_json_delta",
+                    "agent": self.role.value,
+                    "partial_json": delta.partial_json,
                 })
 
     def call_llm(
@@ -221,8 +253,7 @@ class BaseAgent(ABC):
         if on_event:
             on_event({"type": "agent_start", "agent": self.role.value, "task": context.task_description[:120]})
         else:
-            print(f"\nAgent: {self.role.value.title()}")
-            print(f"Task: {context.task_description[:120]}...")
+            logger.info("agent_start", agent=self.role.value, task=context.task_description[:120])
 
         start = time.time()
         try:
@@ -238,9 +269,12 @@ class BaseAgent(ABC):
                     "success": result.success,
                 })
             else:
-                print(
-                    f"Done ({result.tokens_in} in / {result.tokens_out} out tokens, "
-                    f"{result.duration_seconds:.1f}s)"
+                logger.info(
+                    "agent_end",
+                    agent=self.role.value,
+                    tokens_in=result.tokens_in,
+                    tokens_out=result.tokens_out,
+                    duration=f"{result.duration_seconds:.1f}s",
                 )
             return result
         except SystemExit:
@@ -250,7 +284,7 @@ class BaseAgent(ABC):
             if on_event:
                 on_event({"type": "agent_error", "agent": self.role.value, "error": str(e)})
             else:
-                print(f"Error: {e}")
+                logger.error("agent_error", agent=self.role.value, error=str(e))
             return AgentResult(
                 agent=self.role,
                 success=False,

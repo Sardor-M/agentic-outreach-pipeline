@@ -41,6 +41,10 @@ deal_categories:
     min_first_year: 400000
     machine_threshold: 100
 
+# Research depth: "quick" (2 turns), "standard" (5 turns), "deep" (8 turns)
+research:
+  depth: "standard"
+
 # Sales team sign-off for emails
 email_signature: |
   Best regards,
